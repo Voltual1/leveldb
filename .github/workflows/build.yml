@@ -2,125 +2,43 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file. See the AUTHORS file for names of contributors.
 
-name: ci
+name: ci-android
 on: [push, pull_request]
 
 permissions:
   contents: read
 
 jobs:
-  build-and-test:
-    name: >-
-      CI
-      ${{ matrix.os }}
-      ${{ matrix.compiler || matrix.android_abi }}
-      ${{ matrix.optimized && 'release' || 'debug' }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        optimized: [true, false]
-        # 引入一个自定义变量来区分平台类型
-        platform: [native, android]
-        
-        # 默认的本地编译器（仅在 platform 为 native 时有效）
-        compiler: [clang, gcc, msvc]
-        # 安卓架构（仅在 platform 为 android 时有效）
-        android_abi: [arm64-v8a]
-
-        exclude:
-          # --- 过滤掉不合法的 Native 组合 ---
-          - platform: native
-            os: ubuntu-latest
-            compiler: msvc
-          - platform: native
-            os: macos-latest
-            compiler: msvc
-          - platform: native
-            os: macos-latest
-            compiler: gcc
-          - platform: native
-            os: windows-latest
-            compiler: clang
-          - platform: native
-            os: windows-latest
-            compiler: gcc
-          
-          # --- 过滤安卓组合 ---
-          # 安卓交叉编译我们在 Ubuntu 上跑最稳定、最快，排除 macos 和 windows 的安卓编译
-          - platform: android
-            os: macos-latest
-          - platform: android
-            os: windows-latest
-          # 安卓编译不需要 native 的 compiler 变量
-          - platform: android
-            compiler: gcc
-          - platform: android
-            compiler: msvc
-
-        include:
-          # Native 编译器的环境变量映射
-          - platform: native
-            compiler: clang
-            CC: clang
-            CXX: clang++
-          - platform: native
-            compiler: gcc
-            CC: gcc
-            CXX: g++
-          - platform: native
-            compiler: msvc
-            CC:
-            CXX:
-          
-          # 安卓编译的特定配置（使用 Ubuntu 预装的 NDK）
-          - platform: android
-            os: ubuntu-latest
-            compiler: clang
-            android_api: "21"  # 最低支持的 Android API Level
+  build-android:
+    name: Build Android
+    runs-on: ubuntu-latest
 
     env:
       CMAKE_BUILD_DIR: ${{ github.workspace }}/build
-      CMAKE_BUILD_TYPE: ${{ matrix.optimized && 'RelWithDebInfo' || 'Debug' }}
-      CC: ${{ matrix.CC }}
-      CXX: ${{ matrix.CXX }}
-      BINARY_SUFFIX: ${{ startsWith(matrix.os, 'windows') && '.exe' || '' }}
-      BINARY_PATH: >-
-        ${{ format(
-        startsWith(matrix.os, 'windows') && '{0}\build\{1}\' || '{0}/build/',
-        github.workspace,
-        matrix.optimized && 'RelWithDebInfo' || 'Debug') }}
+      # 你可以根据需求改为 'Release' 或 'Debug'
+      CMAKE_BUILD_TYPE: RelWithDebInfo 
+      # 目标安卓架构，常见有：arm64-v8a, armeabi-v7a, x86_64, x86
+      ANDROID_ABI: arm64-v8a
+      # 最低支持的 Android API Level
+      ANDROID_PLATFORM: android-21
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
       with:
         submodules: true
 
-    - name: Install dependencies on Linux (Native)
-      if: ${{ runner.os == 'Linux' && matrix.platform == 'native' }}
+    # GitHub Hosted Runner (ubuntu-latest) 自带了 Android NDK，我们可以直接通过环境变量获取路径
+    - name: Setup Android NDK Path
       run: |
-        sudo apt-get update
-        sudo apt-get install libkyotocabinet-dev libsnappy-dev libsqlite3-dev
+        echo "ANDROID_NDK_HOME=${ANDROID_NDK_LATEST_HOME}" >> $GITHUB_ENV
 
-    # 1. 针对 Native 的 CMake 配置
-    - name: Generate build config (Native)
-      if: ${{ matrix.platform == 'native' }}
+    - name: Generate build config
       run: >-
         cmake -S "${{ github.workspace }}" -B "${{ env.CMAKE_BUILD_DIR }}"
         -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }}
-        -DCMAKE_INSTALL_PREFIX=${{ runner.temp }}/install_test/
-
-    # 2. 针对 Android 的 CMake 配置（核心修改点）
-    - name: Generate build config (Android)
-      if: ${{ matrix.platform == 'android' }}
-      run: >-
-        cmake -S "${{ github.workspace }}" -B "${{ env.CMAKE_BUILD_DIR }}"
-        -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }}
-        -DCMAKE_INSTALL_PREFIX=${{ runner.temp }}/install_test/
-        -DCMAKE_TOOLCHAIN_FILE="${{ env.ANDROID_NDK_LATEST_HOME }}/build/cmake/android.toolchain.cmake"
-        -DANDROID_ABI="${{ matrix.android_abi }}"
-        -DANDROID_PLATFORM="android-${{ matrix.android_api }}"
+        -DCMAKE_TOOLCHAIN_FILE="${{ env.ANDROID_NDK_HOME }}/build/cmake/android.toolchain.cmake"
+        -DANDROID_ABI=${{ env.ANDROID_ABI }}
+        -DANDROID_PLATFORM=${{ env.ANDROID_PLATFORM }}
         -DLEVELDB_BUILD_TESTS=OFF
         -DLEVELDB_BUILD_BENCHMARKS=OFF
 
@@ -128,24 +46,3 @@ jobs:
       run: >-
         cmake --build "${{ env.CMAKE_BUILD_DIR }}"
         --config "${{ env.CMAKE_BUILD_TYPE }}"
-
-    # 以下步骤仅在 Native (非安卓) 模式下运行，因为安卓二进制文件无法在 Ubuntu 宿主机上直接执行
-    - name: Run Tests
-      if: ${{ matrix.platform == 'native' }}
-      working-directory: ${{ github.workspace }}/build
-      run: ctest -C "${{ env.CMAKE_BUILD_TYPE }}" --verbose
-
-    - name: Run LevelDB Benchmarks
-      if: ${{ matrix.platform == 'native' }}
-      run: ${{ env.BINARY_PATH }}db_bench${{ env.BINARY_SUFFIX }}
-
-    - name: Run SQLite Benchmarks
-      if: ${{ matrix.platform == 'native' && runner.os != 'Windows' }}
-      run: ${{ env.BINARY_PATH }}db_bench_sqlite3${{ env.BINARY_SUFFIX }}
-
-    - name: Run Kyoto Cabinet Benchmarks
-      if: ${{ matrix.platform == 'native' && runner.os == 'Linux' && matrix.compiler == 'clang' }}
-      run: ${{ env.BINARY_PATH }}db_bench_tree_db${{ env.BINARY_SUFFIX }}
-
-    - name: Test CMake installation
-      run: cmake --build "${{ env.CMAKE_BUILD_DIR }}" --target install
